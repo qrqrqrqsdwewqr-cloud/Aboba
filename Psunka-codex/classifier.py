@@ -24,6 +24,11 @@ class ClassificationResult:
     rms: Optional[float] = None
     snr_db: Optional[float] = None
     spectral_entropy: Optional[float] = None
+    categories: tuple[int, ...] | None = None
+
+    @property
+    def selected_categories(self) -> tuple[int, ...]:
+        return self.categories or (self.category,)
 
 
 def normalize_text(text: str) -> str:
@@ -45,7 +50,7 @@ def is_audio_noise(samples: Optional[np.ndarray], sample_rate: int) -> tuple[boo
     return bool(silent or (low_snr and noise_like) or hum_like), metrics
 
 
-def classify_fragment(text: str, audio_samples: Optional[np.ndarray] = None, sample_rate: int = config.OUT_RATE) -> ClassificationResult:
+def classify_fragment(text: str, audio_samples: Optional[np.ndarray] = None, sample_rate: int = config.OUT_RATE, language: str | None = None) -> ClassificationResult:
     """Classify by text first; audio only promotes empty/garbage text to noise."""
     cleaned = normalize_text(text)
     audio_noise, metrics = is_audio_noise(audio_samples, sample_rate)
@@ -63,8 +68,11 @@ def classify_fragment(text: str, audio_samples: Optional[np.ndarray] = None, sam
     if garbage_ratio >= config.GARBAGE_SYMBOL_RATIO:
         return ClassificationResult(4 if audio_noise else 3, "garbage symbols", **metrics)
 
+    if language in {"en", "kk", "ky", "uz"}:
+        return _with_noise_overlay(2, f"detected language {language}", audio_noise, metrics)
+
     if LATIN_RE.search(cleaned):
-        return ClassificationResult(2, "latin letters", **metrics)
+        return _with_noise_overlay(2, "latin letters", audio_noise, metrics)
 
     if _is_laughter_only(words):
         return ClassificationResult(4, "laughter without distinguishable speech", **metrics)
@@ -74,9 +82,15 @@ def classify_fragment(text: str, audio_samples: Optional[np.ndarray] = None, sam
             return ClassificationResult(3, "fragmented/interjection text", **metrics)
         if config.DEGRADE_RUSSIAN_ON_BAD_AUDIO and bad_speech_audio:
             return ClassificationResult(3, "russian text with poor audio quality", **metrics)
-        return ClassificationResult(1, "cyrillic russian-like words", **metrics)
+        return _with_noise_overlay(1, "cyrillic russian-like words", audio_noise, metrics)
 
     return ClassificationResult(3, "fallback unintelligible", **metrics)
+
+
+def _with_noise_overlay(category: int, reason: str, audio_noise: bool, metrics: dict[str, float]) -> ClassificationResult:
+    if audio_noise and category in (1, 2, 3):
+        return ClassificationResult(category, reason + " + background noise", **metrics, categories=(category, 4))
+    return ClassificationResult(category, reason, **metrics, categories=(category,))
 
 
 def _looks_unintelligible(text: str, words: list[str]) -> bool:
