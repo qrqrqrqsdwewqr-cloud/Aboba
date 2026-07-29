@@ -4,29 +4,62 @@ from __future__ import annotations
 DEVICE = None
 IN_RATE = 48_000
 IN_CHANNELS = 1
-CHUNK_SECONDS = 7
-COMBINE_COUNT = 1
-TRANSCRIPT_FLUSH_DELAY_SECONDS = 0.2
-STT_CONTEXT_PREFIX_SECONDS = 0.2
-STT_CONTEXT_SUFFIX_SECONDS = 0.2
-MAX_PREFIX_DEDUP_WORDS = 2
-WS_URI = "ws://127.0.0.1:9876/v1/ws"
-REST_URI = "http://127.0.0.1:9876/v1/transcribe"
 OUT_RATE = 48_000
 OUT_CHANNELS = 1
-RETRY_DELAY = 0.5
-SERVER_MAX_PAYLOAD = 524_288
-UPLOAD_CONCURRENCY = 1
 GUI_POLL_INTERVAL_MS = 100
 PROCESS_ONLY_ON_VOICE = False
 PROCESS_ONLY_ON_TOLOKA_PLAY_PAUSE = True
 TOLOKA_WATCH_INTERVAL_SECONDS = 0.1
 TOLOKA_TEMPLATE_THRESHOLD = 0.82
 TOLOKA_CONFIG_PATH = "config.json"
+STT_BACKEND = "gigaam"
+LEGACY_WS_URI = "ws://127.0.0.1:9876/v1/ws"
+LEGACY_REST_URI = "http://127.0.0.1:9876/v1/transcribe"
+RETRY_DELAY = 0.5
 
-# Timestamp matching
+GIGAAM_REPOSITORY = "ai-sage/GigaAM-Multilingual"
+GIGAAM_REVISION = "ctc"
+GIGAAM_DEVICE = "cuda"
+GIGAAM_TRUST_REMOTE_CODE = True
+GIGAAM_INPUT_RATE = 16_000
+
+CAPTURE_PREFIX_SECONDS = 0.4
+CAPTURE_SUFFIX_SECONDS = 0.5
+
+ENABLE_MOUSE_AUTOMATION = True
+AUTOMATION_MODE = "semi_auto"
+SMOOTH_MOUSE = True
+MOUSE_MOVE_DURATION_SECONDS = 0.15
+MOUSE_BEFORE_CLICK_DELAY_SECONDS = 0.04
+MOUSE_AFTER_CLICK_DELAY_SECONDS = 0.08
+MOUSE_RANDOM_OFFSET_PX = 1
+CLICK_RETRY_COUNT = 3
+WATCHER_STABLE_DETECTIONS = 2
+UI_POLL_INTERVAL_SECONDS = 0.10
+ELEMENT_WAIT_TIMEOUT_SECONDS = 5.0
+CHECKBOX_WAIT_TIMEOUT_SECONDS = 2.0
+TEXT_FIELD_WAIT_TIMEOUT_SECONDS = 4.0
+NEXT_TASK_WAIT_TIMEOUT_SECONDS = 15.0
+PLAY_START_TIMEOUT_SECONDS = 3.0
+ENABLE_MULTISCALE_TEMPLATE_MATCHING = True
+TEMPLATE_SCALES = (1.00, 0.95, 0.90, 1.05, 1.10)
+ALLOW_CATEGORY_ROI_CENTER_FALLBACK = True
+ENABLE_FAILSAFE = True
+EMERGENCY_STOP_HOTKEY = "F12"
+PAUSE_AUTOMATION_HOTKEY = "F11"
+
+CATEGORY_RUSSIAN = 1
+CATEGORY_FOREIGN = 2
+CATEGORY_UNINTELLIGIBLE = 3
+CATEGORY_NOISE = 4
+SUPPORTED_CATEGORY_SETS = {(1,), (2,), (3,), (4,), (1, 4), (2, 4), (3, 4)}
+
+# Timestamp matching / legacy aggregation support
 AUDIO_MATCH_WINDOW_SECONDS = 10.0
 AUDIO_STORE_MAX_FRAGMENTS = 80
+MAX_PREFIX_DEDUP_WORDS = 2
+TRANSCRIPT_FLUSH_DELAY_SECONDS = 0.2
+CHUNK_SECONDS = 7
 
 # Audio/noise thresholds
 RMS_SILENCE_THRESHOLD = 0.0006
@@ -55,61 +88,11 @@ LAUGHTER_MARKERS = {"ха", "хаха", "ахаха", "ха-ха"}
 ASR_REPLACEMENTS = {}
 SPOKEN_NAME_FORMS = {"саня": "Саша", "саш": "Саша", "дима": "Дмитрий"}
 COLLOQUIAL_REPLACEMENTS = {"чё": "что", "че": "что", "щас": "сейчас", "тыща": "тысяча"}
-CATEGORY_KEYS = {
-    1: "1",
-    2: "2",
-    3: "3",
-    4: "4",
-    "russian": "1",
-    "music": "1",
-    "speech": "2",
-    "foreign": "2",
-    "noise": "3",
-    "unintelligible": "3",
-    "other": "4",
-}
 REPLACEMENTS = {"чё": "что", "че": "что", "щас": "сейчас", "тыща": "тысяча"}
-YO_WORD_REPLACEMENTS = {
-    "еще": "ещё",
-    "все": "всё",
-    "ее": "её",
-    "елка": "ёлка",
-    "елки": "ёлки",
-    "ежик": "ёжик",
-    "ежики": "ёжики",
-    "еж": "ёж",
-    "ежи": "ежи",
-    "береза": "берёза",
-    "березы": "берёзы",
-    "легкий": "лёгкий",
-    "легкая": "лёгкая",
-    "легкое": "лёгкое",
-    "легкие": "лёгкие",
-    "самолет": "самолёт",
-    "самолеты": "самолёты",
-}
-
-# Optional GUI-controlled keyboard/site automation.
-ENABLE_KEYPRESS_ACTIONS = False
-AUTO_SEND_RUSSIAN_TO_SITE = False
-SITE_WINDOW_TITLE = None
-AUTOMATION_PRESS_ENTER = False
-AUTOMATION_KEY_DELAY_SECONDS = 0.05
-SITE_PRE_OPEN_DELAY_SECONDS = 0.25
-SITE_AFTER_TYPE_DELAY_SECONDS = 0.12
-SITE_SUBMIT_AFTER_PASTE = False
+YO_WORD_REPLACEMENTS = {"еще": "ещё", "все": "всё", "ее": "её", "елка": "ёлка", "елки": "ёлки", "ежик": "ёжик", "ежики": "ёжики", "еж": "ёж", "береза": "берёза", "легкий": "лёгкий", "самолет": "самолёт"}
 USE_CLIPBOARD_PASTE = True
-TEXT_FIELD_READY_TIMEOUT_SECONDS = 2.0
-TEXT_FIELD_READY_CHECK_INTERVAL_SECONDS = 0.2
 
 REQUIRED_PACKAGES = {
-    "numpy": "numpy",
-    "scipy": "scipy",
-    "sounddevice": "sounddevice",
-    "websockets": "websockets",
-    "aiohttp": "aiohttp",
-    "PyQt5": "PyQt5",
-    "pyperclip": "pyperclip",
-    "cv2": "opencv-python",
-    "mss": "mss",
+    "numpy": "numpy", "scipy": "scipy", "sounddevice": "sounddevice", "PyQt5": "PyQt5",
+    "pyperclip": "pyperclip", "cv2": "opencv-python", "mss": "mss", "transformers": "transformers",
 }

@@ -1,142 +1,98 @@
-"""Audio producer and network client loop."""
+"""Audio capture and local STT client loop."""
 from __future__ import annotations
 
-import asyncio
-import io
-import json
-import wave
+import asyncio, time
+from collections import deque
+from dataclasses import dataclass
 
-import aiohttp
 import numpy as np
 import sounddevice as sd
-import websockets
 
 import config
-from audio_utils import AudioFragmentStore, compute_rms, float32_to_int16_bytes, resample_audio, stereo_to_mono
-from consumer import consumer
+from audio_utils import AudioFragmentStore, compute_rms, resample_audio, stereo_to_mono
+from classifier import classify_fragment
+from gigaam_client import GigaAMClient
+from language_detector import detect_language
+from postprocessing import PostprocessRules, TranscriptPostprocessor
+from clipboard_utils import copy_transcript
 
+@dataclass(frozen=True)
+class FullAudioJob:
+    samples: np.ndarray
+    sample_rate: int
+    timestamp: float
 
 def list_devices() -> None:
     print("Available audio devices:")
     for index, dev in enumerate(sd.query_devices()):
         print(f"{index}: {dev['name']} (max_in:{dev['max_input_channels']}, max_out:{dev['max_output_channels']}, default_sr:{dev.get('default_samplerate')})")
 
-
 def choose_device(device_index):
-    if device_index is not None:
-        return device_index
+    if device_index is not None: return device_index
     hints = ("cable", "vb-audio", "stereo mix", "loopback", "virtual")
     for index, dev in enumerate(sd.query_devices()):
-        if any(hint in dev["name"].lower() for hint in hints):
-            print(f"Auto-selected device {index}: {dev['name']}")
-            return index
-    print("No matching virtual cable found; using default input device")
-    return None
+        if any(h in dev["name"].lower() for h in hints):
+            print(f"Auto-selected device {index}: {dev['name']}"); return index
+    print("No matching virtual cable found; using default input device"); return None
 
-
-async def post_combined_via_rest(pcm_bytes: bytes, sample_rate: int, semaphore: asyncio.Semaphore, log=print) -> None:
-    async with semaphore:
-        with io.BytesIO() as wav_io:
-            with wave.open(wav_io, "wb") as wf:
-                wf.setnchannels(1)
-                wf.setsampwidth(2)
-                wf.setframerate(sample_rate)
-                wf.writeframes(pcm_bytes)
-            data = wav_io.getvalue()
-        timeout = aiohttp.ClientTimeout(total=300)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            form = aiohttp.FormData()
-            form.add_field("file", data, filename="combined.wav", content_type="audio/wav")
-            async with session.post(config.REST_URI, data=form) as resp:
-                log(f"REST upload status: {resp.status}, response: {await resp.text()}")
-
-
-async def producer(ws, device_index, audio_store: AudioFragmentStore, process_event=None, log=print) -> None:
-    loop = asyncio.get_running_loop()
-    q: asyncio.Queue[np.ndarray] = asyncio.Queue()
-    chosen = choose_device(device_index)
-    use_rate = config.IN_RATE
-    if chosen is not None:
-        try:
-            use_rate = int(sd.query_devices(chosen).get("default_samplerate", config.IN_RATE))
-        except Exception:
-            use_rate = config.IN_RATE
-
+async def client_loop(device_index, gui_queue, audio_store: AudioFragmentStore, recording_event=None, finish_event=None, stop_event=None, log=print) -> None:
+    if config.STT_BACKEND != "gigaam":
+        raise RuntimeError("Legacy WebSocket/REST STT backend is disabled from the main path; set STT_BACKEND='gigaam'.")
+    producer_q: asyncio.Queue[np.ndarray] = asyncio.Queue(); jobs: asyncio.Queue[FullAudioJob] = asyncio.Queue(maxsize=1)
+    client = GigaAMClient(); post = TranscriptPostprocessor(PostprocessRules(config.REPLACEMENTS, config.ASR_REPLACEMENTS, config.SPOKEN_NAME_FORMS, config.COLLOQUIAL_REPLACEMENTS, config.YO_WORD_REPLACEMENTS))
+    chosen = choose_device(device_index); use_rate = _device_rate(chosen); loop = asyncio.get_running_loop()
     def callback(indata, frames, time_info, status):
-        if status:
-            log("sounddevice status: " + str(status))
-        loop.call_soon_threadsafe(q.put_nowait, indata.copy())
-
+        if status: log("sounddevice status: " + str(status))
+        loop.call_soon_threadsafe(producer_q.put_nowait, indata.copy())
     stream = sd.InputStream(device=chosen, samplerate=use_rate, channels=config.IN_CHANNELS, dtype="float32", callback=callback)
-    semaphore = asyncio.Semaphore(config.UPLOAD_CONCURRENCY)
-    frag_samples = int(config.OUT_RATE * config.CHUNK_SECONDS)
-    suffix_samples = int(config.OUT_RATE * config.STT_CONTEXT_SUFFIX_SECONDS)
-    prefix_samples = int(config.OUT_RATE * config.STT_CONTEXT_PREFIX_SECONDS)
-    previous_tail = np.array([], dtype=np.float32)
-    chunks: list[np.ndarray] = []
-    length = 0
-    combine: list[bytes] = []
     stream.start()
     try:
-        while True:
-            mono = stereo_to_mono(await q.get())
-            resampled = resample_audio(mono, use_rate, config.OUT_RATE)
-            chunks.append(resampled)
-            length += resampled.size
-            while length >= frag_samples + suffix_samples:
-                needed = frag_samples
-                parts: list[np.ndarray] = []
-                while needed:
-                    chunk = chunks.pop(0)
-                    parts.append(chunk[:needed])
-                    if chunk.size > needed:
-                        chunks.insert(0, chunk[needed:])
-                    needed -= min(needed, chunk.size)
-                length -= frag_samples
-                core_fragment = np.concatenate(parts).astype(np.float32)
-                suffix_fragment = _peek_samples(chunks, suffix_samples)
-                stt_fragment = np.concatenate([previous_tail, core_fragment, suffix_fragment]).astype(np.float32)
-                previous_tail = core_fragment[-prefix_samples:].copy() if prefix_samples else np.array([], dtype=np.float32)
-                audio_store.add(stt_fragment, config.OUT_RATE)
-                if config.PROCESS_ONLY_ON_VOICE and compute_rms(core_fragment) <= config.RMS_SILENCE_THRESHOLD:
-                    continue
-                if process_event is not None and not process_event.is_set():
-                    continue
-                if process_event is not None:
-                    process_event.clear()
-                pcm = float32_to_int16_bytes(stt_fragment)
-                for offset in range(0, len(pcm), config.SERVER_MAX_PAYLOAD):
-                    await ws.send(pcm[offset : offset + config.SERVER_MAX_PAYLOAD])
-                combine.append(pcm)
-                if len(combine) >= config.COMBINE_COUNT:
-                    asyncio.create_task(post_combined_via_rest(b"".join(combine), config.OUT_RATE, semaphore, log))
-                    combine.clear()
+        await asyncio.gather(_capture_full_jobs(producer_q, jobs, audio_store, use_rate, recording_event, finish_event, stop_event, log), _transcribe_jobs(jobs, gui_queue, client, post, stop_event, log))
     finally:
-        stream.stop(); stream.close()
+        stream.stop(); stream.close(); client.close()
 
+async def _capture_full_jobs(q, jobs, audio_store, use_rate, recording_event, finish_event, stop_event, log):
+    prefix_samples = int(use_rate * config.CAPTURE_PREFIX_SECONDS); suffix_samples = int(use_rate * config.CAPTURE_SUFFIX_SECONDS)
+    prefix = deque(); prefix_len = 0; recording = False; chunks = []
+    while stop_event is None or not stop_event.is_set():
+        mono = stereo_to_mono(await q.get())
+        if not recording:
+            prefix.append(mono); prefix_len += mono.size
+            while prefix_len > prefix_samples and prefix:
+                removed = prefix.popleft(); prefix_len -= removed.size
+            if recording_event is not None and recording_event.is_set():
+                recording = True; chunks = list(prefix); recording_event.clear(); log("Начата запись полного задания")
+            continue
+        chunks.append(mono)
+        if finish_event is not None and finish_event.is_set():
+            finish_event.clear()
+            remaining = suffix_samples
+            while remaining > 0:
+                extra = stereo_to_mono(await q.get()); chunks.append(extra); remaining -= extra.size
+            samples = np.concatenate(chunks).astype(np.float32) if chunks else np.array([], dtype=np.float32)
+            fragment = audio_store.add(samples, use_rate)
+            if config.PROCESS_ONLY_ON_VOICE and compute_rms(samples) <= config.RMS_SILENCE_THRESHOLD:
+                recording = False; chunks = []; continue
+            await jobs.put(FullAudioJob(fragment.samples, fragment.sample_rate, fragment.timestamp))
+            recording = False; chunks = []; log("Завершена запись полного задания")
 
-def _peek_samples(chunks: list[np.ndarray], sample_count: int) -> np.ndarray:
-    if sample_count <= 0:
-        return np.array([], dtype=np.float32)
-    parts: list[np.ndarray] = []
-    remaining = sample_count
-    for chunk in chunks:
-        if remaining <= 0:
-            break
-        take = min(remaining, chunk.size)
-        parts.append(chunk[:take])
-        remaining -= take
-    if not parts:
-        return np.array([], dtype=np.float32)
-    return np.concatenate(parts).astype(np.float32)
+async def _transcribe_jobs(jobs, gui_queue, client: GigaAMClient, post, stop_event, log):
+    while stop_event is None or not stop_event.is_set():
+        job = await jobs.get()
+        result = await asyncio.to_thread(client.transcribe, job.samples, job.sample_rate)
+        text = post.process(result.text)
+        lang = detect_language(text)
+        classification = classify_fragment(text, job.samples, job.sample_rate, language=lang.language)
+        if classification.category in (config.CATEGORY_RUSSIAN,): copy_transcript(text)
+        display = text if classification.category in (1, 2) else _placeholder(classification.category)
+        try: gui_queue.put_nowait((display or "<<empty>>", classification, text, lang, result))
+        except Exception: log("GUI queue full")
 
+def _device_rate(chosen) -> int:
+    if chosen is not None:
+        try: return int(sd.query_devices(chosen).get("default_samplerate", config.IN_RATE))
+        except Exception: pass
+    return config.IN_RATE
 
-async def client_loop(device_index, gui_queue, audio_store: AudioFragmentStore, process_event=None, log=print) -> None:
-    while True:
-        try:
-            async with websockets.connect(config.WS_URI, max_size=None) as ws:
-                await ws.send(json.dumps({"type": "start", "sample_rate": config.OUT_RATE, "channels": config.OUT_CHANNELS, "format": "pcm16"}))
-                await asyncio.gather(producer(ws, device_index, audio_store, process_event, log), consumer(ws, gui_queue, audio_store, log))
-        except Exception as exc:
-            log("Connection error: " + repr(exc))
-            await asyncio.sleep(config.RETRY_DELAY)
+def _placeholder(category: int) -> str:
+    return {2:"<<foreign speech: transcript hidden>>", 3:"<<unintelligible speech>>", 4:"<<noise>>"}.get(category, "<<unknown>>")
