@@ -1,0 +1,38 @@
+{
+  "toloka_search_region": {
+    "left": 1453,
+    "top": 306,
+    "width": 460,
+    "height": 162
+  },
+  "category_1_region": {
+    "left": 1469,
+    "top": 528,
+    "width": 10,
+    "height": 12
+  },
+  "category_3_region": {
+    "left": 1470,
+    "top": 617,
+    "width": 7,
+    "height": 9
+  },
+  "category_4_region": {
+    "left": 1467,
+    "top": 750,
+    "width": 11,
+    "height": 9
+  },
+  "send_button_region": {
+    "left": 1640,
+    "top": 882,
+    "width": 59,
+    "height": 12
+  },
+  "send_button_region_2": {
+    "left": 1648,
+    "top": 1016,
+    "width": 13,
+    "height": 10
+  }
+}
